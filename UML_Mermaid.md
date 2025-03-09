@@ -11,51 +11,51 @@ sequenceDiagram
 
     %% 拡張機能の起動
     User->>Extension: VSCode拡張機能を起動
-    Extension->>Extension: activate()
-    Extension->>Provider: new ClineProvider()
-    Provider->>Provider: 初期化処理
-    Extension->>Extension: コマンド登録
-    Extension->>Extension: WebViewProvider登録
+    Extension->>Extension: activate() %% 拡張機能の起動時に呼び出される初期化関数
+    Extension->>Provider: new ClineProvider() %% Cline機能を提供するプロバイダーを作成
+    Provider->>Provider: 初期化処理 %% 設定の読み込みや状態の初期化
+    Extension->>Extension: コマンド登録 %% VSCodeコマンドパレットからの操作を可能にする
+    Extension->>Extension: WebViewProvider登録 %% UIを表示するためのWebViewを登録
 
     %% サイドバー表示
     User->>Extension: サイドバーを開く
-    Extension->>Provider: resolveWebviewView()
-    Provider->>Provider: Webviewを初期化
-    Provider->>Provider: setWebviewMessageListener()
+    Extension->>Provider: resolveWebviewView() %% サイドバーのWebView表示を解決する関数
+    Provider->>Provider: Webviewを初期化 %% HTML/CSSの読み込みとUIの準備
+    Provider->>Provider: setWebviewMessageListener() %% WebViewとの通信用リスナーを設定
 
     %% タスク開始
     User->>Provider: タスク入力
-    Provider->>Provider: webviewMessageListener処理
-    Provider->>Provider: initClineWithTask()
-    Provider->>Core: new Cline()
-    Core->>Core: 初期化処理
-    Core->>Core: startTask()
-    Core->>Core: initiateTaskLoop()
+    Provider->>Provider: webviewMessageListener処理 %% ユーザー入力メッセージを受信して処理
+    Provider->>Provider: initClineWithTask() %% タスクに基づいてClineを初期化
+    Provider->>Core: new Cline() %% コア処理を担当するClineインスタンスを作成
+    Core->>Core: 初期化処理 %% コンテキスト設定やモデル準備
+    Core->>Core: startTask() %% タスク処理を開始
+    Core->>Core: initiateTaskLoop() %% AIとの対話ループを開始
 
     %% APIリクエスト
-    Core->>Core: recursivelyMakeClineRequests()
-    Core->>Core: loadContext()
-    Core->>API: createMessage()
-    API-->>Core: ストリーミングレスポンス
-    Core->>Core: presentAssistantMessage()
+    Core->>Core: recursivelyMakeClineRequests() %% 再帰的にAIリクエストを処理
+    Core->>Core: loadContext() %% タスクに必要なコンテキスト情報を読み込み
+    Core->>API: createMessage() %% AIモデルへのリクエストを作成して送信
+    API-->>Core: ストリーミングレスポンス %% AIからの応答をリアルタイムで受信
+    Core->>Core: presentAssistantMessage() %% AIの応答をユーザーに表示
 
     %% ツール使用
-    Core->>Core: ツール使用を検出
-    Core->>User: ツール承認リクエスト
-    User-->>Core: 承認
-    Core->>Tools: ツール実行
-    Tools-->>Core: 実行結果
-    Core->>Core: 結果をユーザーに表示
+    Core->>Core: ツール使用を検出 %% AIレスポンス内のツール使用要求を識別
+    Core->>User: ツール承認リクエスト %% ユーザーにツール実行の許可を求める
+    User-->>Core: 承認 %% ユーザーがツール実行を承認
+    Core->>Tools: ツール実行 %% 指定されたツールを実行
+    Tools-->>Core: 実行結果 %% ツール実行の結果を取得
+    Core->>Core: 結果をユーザーに表示 %% ツール実行結果をUIに表示
 
     %% 次のAPIリクエスト
-    Core->>API: 次のリクエスト
-    API-->>Core: ストリーミングレスポンス
+    Core->>API: 次のリクエスト %% ツール実行結果を含めた次のAIリクエスト
+    API-->>Core: ストリーミングレスポンス %% 新しい応答をストリーミングで受信
 
     %% タスク完了
-    Core->>Core: attempt_completionツール検出
-    Core->>User: 完了結果表示
-    User->>Provider: 新しいタスク開始または終了
-    Provider->>Core: clearTask()
+    Core->>Core: attempt_completionツール検出 %% タスク完了を示す特殊ツールを検出
+    Core->>User: 完了結果表示 %% タスク完了結果をユーザーに表示
+    User->>Provider: 新しいタスク開始または終了 %% ユーザーが次のアクションを選択
+    Provider->>Core: clearTask() %% 現在のタスクをクリアして新しいタスクの準備
 ```
 
 ## 主要コンポーネントの説明
