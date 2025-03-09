@@ -6,14 +6,19 @@ sequenceDiagram
     participant Extension as extension.ts
     participant Provider as ClineProvider.ts
     participant Core as Cline.ts
+    participant Context as コンテキスト管理
     participant API as APIハンドラー
     participant Tools as 各種ツール
+    participant Models as AIモデル
 
     %% 拡張機能の起動
     User->>Extension: VSCode拡張機能を起動
     Extension->>Extension: activate() %% 拡張機能の起動時に呼び出される初期化関数
     Extension->>Provider: new ClineProvider() %% Cline機能を提供するプロバイダーを作成
     Provider->>Provider: 初期化処理 %% 設定の読み込みや状態の初期化
+    Provider->>Provider: loadSettings() %% ユーザー設定の読み込み
+    Provider->>Provider: loadCustomModes() %% カスタムモードの読み込み
+    Provider->>Provider: initializeFileWatchers() %% 設定ファイルの変更監視
     Extension->>Extension: コマンド登録 %% VSCodeコマンドパレットからの操作を可能にする
     Extension->>Extension: WebViewProvider登録 %% UIを表示するためのWebViewを登録
 
@@ -22,53 +27,141 @@ sequenceDiagram
     Extension->>Provider: resolveWebviewView() %% サイドバーのWebView表示を解決する関数
     Provider->>Provider: Webviewを初期化 %% HTML/CSSの読み込みとUIの準備
     Provider->>Provider: setWebviewMessageListener() %% WebViewとの通信用リスナーを設定
+    Provider->>Provider: setupThemeListener() %% テーマ変更の監視と適用
 
     %% タスク開始
     User->>Provider: タスク入力
     Provider->>Provider: webviewMessageListener処理 %% ユーザー入力メッセージを受信して処理
     Provider->>Provider: initClineWithTask() %% タスクに基づいてClineを初期化
+    Provider->>Provider: validateMode() %% 選択されたモードの検証
     Provider->>Core: new Cline() %% コア処理を担当するClineインスタンスを作成
     Core->>Core: 初期化処理 %% コンテキスト設定やモデル準備
     Core->>Core: startTask() %% タスク処理を開始
     Core->>Core: initiateTaskLoop() %% AIとの対話ループを開始
 
-    %% APIリクエスト
-    Core->>Core: recursivelyMakeClineRequests() %% 再帰的にAIリクエストを処理
-    Core->>Core: loadContext() %% タスクに必要なコンテキスト情報を読み込み
-    Core->>Core: preparePrompt() %% システムプロンプトとユーザーメッセージを構築
-    Core->>Core: selectModel() %% 設定に基づいて適切なAIモデルを選択
-    Core->>API: createMessage() %% AIモデルへのリクエストを作成して送信
-    Note over Core,API: モデル選択、温度、最大トークン数などのパラメータを設定
-    API-->>Core: ストリーミングレスポンス %% AIからの応答をリアルタイムで受信
-    Core->>Core: processStreamingResponse() %% ストリーミングデータを処理
-    Core->>Core: parseToolCalls() %% レスポンス内のツール使用要求を解析
-    Core->>Core: presentAssistantMessage() %% AIの応答をユーザーに表示
+    %% コンテキスト準備
+    Core->>Context: loadContext() %% タスクに必要なコンテキスト情報を読み込み
+    Context->>Context: parseMentions() %% @ファイルパスなどのメンションを解析
+    Context->>Context: getEnvironmentDetails() %% 環境情報を取得
+    Note over Context: VSCode表示ファイル、開いているタブ、<br>アクティブなターミナル情報、<br>現在の時刻、ファイル構造など
+    Context-->>Core: 解析済みコンテキスト
 
-    %% ツール使用
+    %% プロンプト準備
+    Core->>Core: preparePrompt() %% システムプロンプトとユーザーメッセージを構築
+    Core->>Core: buildSystemPrompt() %% 基本システムプロンプトの構築
+    Core->>Core: addUserInstructions() %% カスタム指示の追加
+    Core->>Core: addLanguagePreference() %% 言語設定の追加
+    Core->>Core: addClineRules() %% .clinerules設定の追加
+    Core->>Core: addClineIgnore() %% .clineignore設定の追加
+    Core->>Core: addModeSpecificInstructions() %% モード固有の指示を追加
+
+    %% モデル選択
+    Core->>Core: selectModel() %% 設定に基づいて適切なAIモデルを選択
+    Core->>Core: checkModelAvailability() %% モデルの利用可能性を確認
+    Core->>Core: applyModelFallback() %% 必要に応じて代替モデルを選択
+    Note over Core: モデル選択基準：<br>ユーザー設定、タスク複雑さ、<br>利用可能なAPIキー
+
+    %% コンテキスト管理
+    Core->>Context: manageContextWindow() %% コンテキストウィンドウサイズを管理
+    Context->>Context: calculateTokenUsage() %% 現在のトークン使用量を計算
+    Context->>Context: getTruncationRange() %% 切り詰め範囲を決定
+    Context->>Context: getTruncatedMessages() %% 切り詰められた会話履歴を取得
+    Context-->>Core: 最適化されたコンテキスト
+
+    %% APIリクエスト
+    Core->>API: createMessage() %% AIモデルへのリクエストを作成して送信
+    API->>API: setModelParameters() %% モデルパラメータを設定
+    Note over API: 温度、最大トークン数、<br>トップP/K、頻度ペナルティなど
+    API->>Models: sendRequest() %% 選択されたモデルにリクエスト送信
+    Note over API,Models: Anthropic, OpenAI, Google,<br>Mistral, ローカルモデルなど
+    Models-->>API: ストリーミングレスポンス開始
+
+    %% レスポンス処理ループ
+    loop ストリーミング処理
+        Models-->>API: レスポンスチャンク
+        API-->>Core: チャンク転送
+        Core->>Core: processStreamingResponse() %% ストリーミングデータを処理
+        Core->>Core: updateTokenUsage() %% トークン使用量を更新
+        Core->>Core: renderMarkdown() %% マークダウンをレンダリング
+        Core->>User: incrementalDisplay() %% 増分表示
+    end
+
+    %% ツール使用検出
+    Core->>Core: parseToolCalls() %% レスポンス内のツール使用要求を解析
     Core->>Core: detectToolUse() %% AIレスポンス内のツール使用要求を識別
     Core->>Core: validateToolRequest() %% ツールリクエストの形式と権限を検証
     Core->>Core: checkToolPermissions() %% 現在のモードでツールが使用可能か確認
     Core->>User: requestToolApproval() %% ユーザーにツール実行の許可を求める
     Note over Core,User: ツール名、パラメータ、潜在的な影響を表示
-    User-->>Core: 承認または拒否 %% ユーザーがツール実行を判断
     
+    %% ユーザー承認と実行
     alt ユーザーが承認した場合
+        User-->>Core: 承認
         Core->>Tools: executeToolRequest() %% 指定されたツールを実行
         Note over Core,Tools: ファイル操作、コマンド実行、ブラウザ操作など
-        Tools-->>Core: 実行結果 %% ツール実行の結果を取得
+        
+        %% ツール実行の分岐
+        alt ファイル操作ツール
+            Tools->>Tools: read_file/write_to_file/apply_diff
+            Tools->>Tools: validateFilePath() %% ファイルパスの検証
+            Tools->>Tools: checkFilePermissions() %% ファイルアクセス権限の確認
+        else コマンド実行ツール
+            Tools->>Tools: execute_command
+            Tools->>Tools: sanitizeCommand() %% コマンドの安全性確認
+            Tools->>Tools: setupTerminal() %% ターミナル環境の準備
+        else ブラウザ操作ツール
+            Tools->>Tools: browser_action
+            Tools->>Tools: initializePuppeteer() %% ブラウザエンジンの初期化
+            Tools->>Tools: executeAction() %% ブラウザアクションの実行
+        else MCP関連ツール
+            Tools->>Tools: use_mcp_tool/access_mcp_resource
+            Tools->>Tools: validateMcpRequest() %% MCPリクエストの検証
+            Tools->>Tools: connectToMcpServer() %% MCPサーバーへの接続
+        end
+        
+        Tools-->>Core: 実行結果
         Core->>Core: processToolResult() %% ツール実行結果を処理
+        Core->>Core: formatToolResult() %% ツール結果のフォーマット
         Core->>Core: displayToolResult() %% ツール実行結果をUIに表示
+        Core->>User: 実行結果を表示
     else ユーザーが拒否した場合
+        User-->>Core: 拒否
         Core->>Core: handleRejectedTool() %% 拒否されたツールの処理
         Core->>Core: notifyAIOfRejection() %% AIにツール拒否を通知
+        Core->>User: 拒否メッセージを表示
+    end
+
+    %% エラー処理とリトライ
+    alt エラー発生時
+        Core->>Core: handleApiError() %% APIエラーの処理
+        Core->>Core: categorizeError() %% エラータイプの分類
+        
+        alt 接続エラーの場合
+            Core->>Core: retryWithBackoff() %% バックオフ戦略でリトライ
+            Core->>API: 再リクエスト
+        else コンテキスト長超過の場合
+            Core->>Context: reduceContextSize() %% コンテキストサイズを削減
+            Core->>API: 縮小したコンテキストで再リクエスト
+        else レート制限の場合
+            Core->>Core: applyRateLimitBackoff() %% レート制限バックオフ
+            Core->>User: レート制限通知
+            Core->>API: 待機後に再リクエスト
+        else モデルエラーの場合
+            Core->>Core: switchToFallbackModel() %% 代替モデルに切り替え
+            Core->>API: 代替モデルで再リクエスト
+        end
     end
 
     %% 次のAPIリクエスト
-    Core->>Core: updateContext() %% ツール実行結果をコンテキストに追加
-    Core->>Core: manageContextWindow() %% コンテキストウィンドウサイズを管理
+    Core->>Context: updateContext() %% ツール実行結果をコンテキストに追加
+    Context->>Context: prioritizeContent() %% 重要なコンテンツを優先
+    Context->>Context: manageContextWindow() %% コンテキストウィンドウサイズを管理
+    Context-->>Core: 更新されたコンテキスト
     Core->>API: createFollowUpMessage() %% ツール実行結果を含めた次のAIリクエスト
     Note over Core,API: 前回の会話履歴とツール実行結果を含める
-    API-->>Core: ストリーミングレスポンス %% 新しい応答をストリーミングで受信
+    API->>Models: sendRequest() %% 更新されたコンテキストでリクエスト
+    Models-->>API: ストリーミングレスポンス
+    API-->>Core: ストリーミングレスポンス転送
     Core->>Core: handleModelResponse() %% モデルレスポンスを処理
 
     %% タスク完了
@@ -76,11 +169,15 @@ sequenceDiagram
     Note over Core: タスク完了を示す特殊ツールを検出
     Core->>Core: validateCompletionResult() %% 完了結果の検証
     Core->>Core: finalizeTask() %% タスクの最終処理を実行
+    Core->>Core: saveTaskHistory() %% タスク履歴を保存
     Core->>User: displayCompletionResult() %% タスク完了結果をユーザーに表示
     Note over Core,User: 完了結果とデモコマンド（オプション）を表示
+    
+    %% 新しいタスクまたは終了
     User->>Provider: 新しいタスク開始または終了 %% ユーザーが次のアクションを選択
     Provider->>Core: clearTask() %% 現在のタスクをクリアして新しいタスクの準備
     Provider->>Provider: resetState() %% プロバイダーの状態をリセット
+    Provider->>Provider: prepareForNewTask() %% 新しいタスクの準備
 ```
 
 ## 主要コンポーネントの説明
@@ -94,33 +191,101 @@ Webviewの管理とユーザーインターフェースの処理を担当しま�
 ### Cline.ts
 コア処理ロジックとツール実行を担当します。APIリクエストの送信、レスポンスの処理、ツールの実行などを行います。
 
+### コンテキスト管理
+会話履歴やファイル情報などのコンテキストを管理します。トークン使用量の最適化や重要情報の優先順位付けを行います。
+
+### APIハンドラー
+AIモデルとの通信を担当します。リクエストの送信、レスポンスの受信、エラー処理などを行います。
+
+### 各種ツール
+ファイル操作、コマンド実行、ブラウザ操作などのツールを提供します。AIからの要求に基づいて実行されます。
+
+### AIモデル
+Anthropic（Claude）、OpenAI（GPT-4、GPT-3.5）、Google（Gemini）、Mistral AIなどの外部AIモデルとの連携を行います。
+
 ## 主要な処理フロー
 
 1. **拡張機能の起動**：
    - VSCode拡張機能が起動すると、`extension.ts`の`activate()`関数が実行されます
    - `ClineProvider`のインスタンスが作成され、WebViewProviderとして登録されます
+   - ユーザー設定、カスタムモード、ファイル監視などが初期化されます
 
 2. **サイドバー表示**：
    - ユーザーがサイドバーを開くと、`resolveWebviewView()`が呼び出されます
    - Webviewが初期化され、メッセージリスナーが設定されます
+   - テーマ変更の監視と適用が設定されます
 
 3. **タスク開始**：
    - ユーザーがタスクを入力すると、`webviewMessageListener`がメッセージを処理します
-   - `initClineWithTask()`が呼び出され、`Cline`インスタンスが作成されます
-   - `startTask()`が実行され、タスクループが開始されます
+   - `initClineWithTask()`が呼び出され、選択されたモードが検証されます
+   - `Cline`インスタンスが作成され、`startTask()`が実行されます
+   - `initiateTaskLoop()`が呼び出され、AIとの対話ループが開始されます
 
-4. **APIリクエスト**：
-   - `recursivelyMakeClineRequests()`が実行され、APIリクエストが送信されます
-   - APIからのレスポンスがストリーミングで受信され、`presentAssistantMessage()`で処理されます
+4. **コンテキスト準備**：
+   - `loadContext()`が呼び出され、タスクに必要なコンテキスト情報が読み込まれます
+   - ファイルメンション（@ファイルパスなど）が解析されます
+   - 環境情報（VSCode表示ファイル、開いているタブ、ターミナル情報など）が取得されます
 
-5. **ツール使用**：
-   - レスポンス内でツール使用が検出されると、ユーザーに承認を求めます
-   - 承認されると、対応するツールが実行され、結果がユーザーに表示されます
-   - ツール実行結果を含めて次のAPIリクエストが送信されます
+5. **プロンプト準備**：
+   - `preparePrompt()`が呼び出され、システムプロンプトとユーザーメッセージが構築されます
+   - 基本システムプロンプト、カスタム指示、言語設定、.clinerules、.clineignoreなどが追加されます
+   - モード固有の指示が追加されます
 
-6. **タスク完了**：
-   - `attempt_completion`ツールが検出されると、タスク完了と見なされます
-   - 完了結果がユーザーに表示され、新しいタスクを開始するか終了するかを選択できます
+6. **モデル選択**：
+   - `selectModel()`が呼び出され、設定に基づいて適切なAIモデルが選択されます
+   - モデルの利用可能性が確認され、必要に応じて代替モデルが選択されます
+   - 選択基準には、ユーザー設定、タスク複雑さ、利用可能なAPIキーなどが含まれます
+
+7. **コンテキスト管理**：
+   - `manageContextWindow()`が呼び出され、コンテキストウィンドウサイズが管理されます
+   - 現在のトークン使用量が計算され、切り詰め範囲が決定されます
+   - 切り詰められた会話履歴が取得され、最適化されたコンテキストが返されます
+
+8. **APIリクエスト**：
+   - `createMessage()`が呼び出され、AIモデルへのリクエストが作成されて送信されます
+   - モデルパラメータ（温度、最大トークン数、トップP/Kなど）が設定されます
+   - 選択されたモデル（Anthropic、OpenAI、Googleなど）にリクエストが送信されます
+   - ストリーミングレスポンスの受信が開始されます
+
+9. **レスポンス処理ループ**：
+   - レスポンスチャンクが受信され、`processStreamingResponse()`で処理されます
+   - トークン使用量が更新され、マークダウンがレンダリングされます
+   - 増分表示によりユーザーにリアルタイムでレスポンスが表示されます
+
+10. **ツール使用検出**：
+    - `parseToolCalls()`が呼び出され、レスポンス内のツール使用要求が解析されます
+    - ツールリクエストの形式と権限が検証されます
+    - 現在のモードでツールが使用可能か確認されます
+    - ユーザーにツール実行の許可が求められます
+
+11. **ユーザー承認と実行**：
+    - ユーザーがツール実行を承認または拒否します
+    - 承認された場合、対応するツール（ファイル操作、コマンド実行、ブラウザ操作など）が実行されます
+    - ツール実行結果が処理され、ユーザーに表示されます
+    - 拒否された場合、AIにツール拒否が通知されます
+
+12. **エラー処理とリトライ**：
+    - APIエラーが発生した場合、エラータイプが分類されます
+    - 接続エラーの場合、バックオフ戦略でリトライされます
+    - コンテキスト長超過の場合、コンテキストサイズが削減されて再リクエストされます
+    - レート制限の場合、バックオフが適用され、待機後に再リクエストされます
+    - モデルエラーの場合、代替モデルに切り替えられて再リクエストされます
+
+13. **次のAPIリクエスト**：
+    - ツール実行結果がコンテキストに追加されます
+    - 重要なコンテンツが優先され、コンテキストウィンドウサイズが管理されます
+    - 更新されたコンテキストで次のAIリクエストが送信されます
+    - 新しいストリーミングレスポンスが処理されます
+
+14. **タスク完了**：
+    - `attempt_completion`ツールが検出されると、タスク完了と見なされます
+    - 完了結果が検証され、タスクの最終処理が実行されます
+    - タスク履歴が保存され、完了結果がユーザーに表示されます
+
+15. **新しいタスクまたは終了**：
+    - ユーザーが新しいタスクを開始するか終了するかを選択します
+    - 現在のタスクがクリアされ、プロバイダーの状態がリセットされます
+    - 新しいタスクの準備が行われます
 
 ## AIモデルとの連携
 
