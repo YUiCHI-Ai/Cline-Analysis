@@ -208,3 +208,209 @@ Clineは再帰的なインタラクションループを通じてタスクを進
    - 長期的なタスクでのコンテキスト管理
    - 重要な情報の保持と不要な情報の削除
    - トークン使用量の最適化
+
+## 主要関数の詳細実装
+
+### initiateTaskLoop() - AIとの対話ループを開始
+
+この関数は、ユーザーのタスク入力からAIとの対話ループを開始する役割を担っています。
+
+```typescript
+private async initiateTaskLoop(userContent: UserContent, isNewTask: boolean): Promise<void> {
+    let nextUserContent = userContent;
+    let includeFileDetails = true;
+    while (!this.abort) {
+        const didEndLoop = await this.recursivelyMakeClineRequests(nextUserContent, includeFileDetails, isNewTask);
+        includeFileDetails = false; // 最初のリクエストでのみファイル詳細を含める
+
+        if (didEndLoop) {
+            // タスクが完了した場合（attempt_completionが呼ばれた場合）、ループを抜ける
+            break;
+        } else {
+            // AIがツールを使用せずにテキストのみで応答した場合、タスク継続を促す
+            nextUserContent = [
+                {
+                    type: "text",
+                    text: formatResponse.noToolsUsed(),
+                }
+            ];
+            this.consecutiveMistakeCount++;
+        }
+    }
+}
+```
+
+主な処理内容：
+- ユーザーのタスク内容（userContent）を受け取り、AIとの対話ループを開始します
+- 最初のリクエストでは環境情報（ファイル構造など）を含めます（includeFileDetails = true）
+- `recursivelyMakeClineRequests()`を呼び出してAIリクエストを処理します
+- AIがツールを使用せずにテキストのみで応答した場合、タスク継続を促すメッセージを送信します
+- ユーザーがタスクをキャンセルするか、AIが`attempt_completion`ツールを使用するまでループを継続します
+- 連続してツールを使用しない場合、consecutiveMistakeCountをインクリメントして、一定回数以上になると警告を表示します
+
+### recursivelyMakeClineRequests() - 再帰的にAIリクエストを処理
+
+この関数は、AIとのリクエスト・レスポンスサイクルを管理する中核的な関数です。
+
+```typescript
+async recursivelyMakeClineRequests(
+    userContent: UserContent,
+    includeFileDetails: boolean = false,
+    isNewTask: boolean = false
+): Promise<boolean> {
+    // コンテキスト情報のロード
+    const [parsedUserContent, environmentDetails] = await this.loadContext(userContent, includeFileDetails);
+    userContent = parsedUserContent;
+    userContent.push({ type: "text", text: environmentDetails });
+    
+    // APIリクエストの送信と応答の処理
+    await this.addToApiConversationHistory({
+        role: "user",
+        content: userContent,
+    });
+    
+    // APIストリームの初期化と処理
+    const stream = this.attemptApiRequest(previousApiReqIndex);
+    
+    // ストリーミングレスポンスの処理
+    for await (const chunk of stream) {
+        // チャンクの処理（使用量、推論、テキスト）
+        // アシスタントメッセージの解析とツール使用の検出
+        // presentAssistantMessage()を呼び出してUIに表示
+    }
+    
+    // アシスタントの応答をAPIの会話履歴に追加
+    await this.addToApiConversationHistory({
+        role: "assistant",
+        content: [{ type: "text", text: assistantMessage }],
+    });
+    
+    // ツール使用の有無を確認して次のステップを決定
+    const didToolUse = this.assistantMessageContent.some((block) => block.type === "tool_use");
+    
+    if (!didToolUse) {
+        // ツール使用がない場合、タスク継続を促す
+        this.userMessageContent.push({
+            type: "text",
+            text: formatResponse.noToolsUsed(),
+        });
+        this.consecutiveMistakeCount++;
+    }
+    
+    // 再帰的に次のリクエストを処理
+    const recDidEndLoop = await this.recursivelyMakeClineRequests(this.userMessageContent);
+    return recDidEndLoop;
+}
+```
+
+主な処理内容：
+- `loadContext()`を呼び出してユーザーコンテンツと環境情報を準備します
+- APIリクエストを送信し、ストリーミングレスポンスを処理します
+- レスポンスを解析してアシスタントメッセージとツール使用を検出します
+- ツール使用があれば実行し、結果をユーザーに表示します
+- ツール実行結果を含めて次のAPIリクエストを再帰的に処理します
+- エラー処理、トークン使用量の追跡、会話履歴の管理なども行います
+- 連続してエラーが発生した場合、ユーザーに通知して対応を求めます
+- チェックポイント機能を使用して、タスクの状態を保存します
+
+### loadContext() - タスクに必要なコンテキスト情報を読み込み
+
+この関数は、AIに提供するコンテキスト情報を準備します。
+
+```typescript
+async loadContext(userContent: UserContent, includeFileDetails: boolean = false) {
+    return await Promise.all([
+        // ユーザーコンテンツ内のメンション（@ファイルパスなど）を解析
+        Promise.all(
+            userContent.map(async (block) => {
+                if (block.type === "text") {
+                    if (
+                        block.text.includes("<feedback>") ||
+                        block.text.includes("<answer>") ||
+                        block.text.includes("<task>") ||
+                        block.text.includes("<user_message>")
+                    ) {
+                        return {
+                            ...block,
+                            text: await parseMentions(block.text, cwd, this.urlContentFetcher),
+                        }
+                    }
+                }
+                return block;
+            }),
+        ),
+        // 環境詳細情報の取得
+        this.getEnvironmentDetails(includeFileDetails),
+    ]);
+}
+```
+
+主な処理内容：
+- ユーザーコンテンツ内のメンション（@ファイルパスなど）を解析して実際のコンテンツに置き換えます
+- `getEnvironmentDetails()`を呼び出して環境情報を取得します
+  - VSCodeの表示ファイル、開いているタブ
+  - アクティブなターミナル情報と出力
+  - 現在の時刻とタイムゾーン
+  - 現在の作業ディレクトリのファイル構造（includeFileDetails=trueの場合）
+  - 現在のモード（PlanモードかActモード）の情報
+- ユーザーが生成したコンテンツ（フィードバック、回答、タスク、メッセージ）を特定のタグで囲み、メンション解析の対象とします
+
+### preparePrompt() - システムプロンプトとユーザーメッセージを構築
+
+この関数は直接実装されていませんが、`recursivelyMakeClineRequests()`内で以下のようにプロンプトを構築しています：
+
+```typescript
+// システムプロンプトの構築
+let systemPrompt = await SYSTEM_PROMPT(cwd, supportsComputerUse, mcpHub, this.browserSettings);
+
+// カスタム指示、言語設定、.clinerules、.clineignoreなどの追加
+if (
+    settingsCustomInstructions ||
+    clineRulesFileInstructions ||
+    clineIgnoreInstructions ||
+    preferredLanguageInstructions
+) {
+    systemPrompt += addUserInstructions(
+        settingsCustomInstructions,
+        clineRulesFileInstructions,
+        clineIgnoreInstructions,
+        preferredLanguageInstructions,
+    );
+}
+
+// コンテキストウィンドウの管理（トークン数が多い場合に会話履歴を切り詰める）
+if (previousApiReqIndex >= 0) {
+    const previousRequest = this.clineMessages[previousApiReqIndex];
+    if (previousRequest && previousRequest.text) {
+        const { tokensIn, tokensOut, cacheWrites, cacheReads } = JSON.parse(previousRequest.text);
+        const totalTokens = (tokensIn || 0) + (tokensOut || 0) + (cacheWrites || 0) + (cacheReads || 0);
+        let contextWindow = this.api.getModel().info.contextWindow || 128_000;
+        
+        // コンテキストウィンドウサイズに基づいて会話履歴を切り詰める
+        if (totalTokens >= maxAllowedSize) {
+            this.conversationHistoryDeletedRange = getNextTruncationRange(
+                this.apiConversationHistory,
+                this.conversationHistoryDeletedRange,
+                keep,
+            );
+        }
+    }
+}
+
+// 切り詰められた会話履歴の取得
+const truncatedConversationHistory = getTruncatedMessages(
+    this.apiConversationHistory,
+    this.conversationHistoryDeletedRange,
+);
+
+// APIリクエストの作成と送信
+let stream = this.api.createMessage(systemPrompt, truncatedConversationHistory);
+```
+
+主な処理内容：
+- システムプロンプトの構築（AIの役割、ツール使用ガイドライン、制約条件など）
+- カスタム指示、言語設定、.clinerules、.clineignoreなどの追加
+- コンテキストウィンドウの管理（トークン数が多い場合に会話履歴を切り詰める）
+- モデルの特性に応じたコンテキストウィンドウサイズの調整
+- 切り詰められた会話履歴を使用してAPIリクエストを作成
+- 異なるAIモデル間での切り替えに対応するためのコンテキスト管理
