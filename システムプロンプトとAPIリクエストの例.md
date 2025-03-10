@@ -50,14 +50,366 @@ OBJECTIVE
 
 ## 2. APIリクエストへの変換プロセス
 
-### 2.1 基本的な変換フロー
+### 2.1 基本的な変換フロー（詳細解説）
 
-1. `Cline.ts`の`recursivelyMakeClineRequests`メソッドが呼び出される
-2. `SYSTEM_PROMPT`関数がシステムプロンプトを生成
-3. ユーザーのカスタム指示があれば`addUserInstructions`関数で追加
-4. 環境情報が`getEnvironmentDetails`メソッドで収集され追加
-5. 会話履歴が`apiConversationHistory`から取得され追加
-6. 最終的なプロンプトがAPIに送信される
+CoolClineのシステムプロンプトがAPIリクエストに変換される基本的なフローについて、詳細に解説します。
+
+#### 1. `recursivelyMakeClineRequests`メソッドの呼び出し
+
+`cline/src/core/Cline.ts`に実装されている`recursivelyMakeClineRequests`メソッドは、CoolClineの中核となる再帰的なAPI通信処理を担当しています。このメソッドは以下のような役割を持っています：
+
+- ユーザーからの入力を受け取り、APIリクエストを構築する
+- APIレスポンスを解析し、必要なツール実行を行う
+- ツール実行結果を次のAPIリクエストに含める
+- タスクが完了するまでこのプロセスを繰り返す
+
+実装上は非同期関数として定義され、Promise<void>を返します。内部では再帰呼び出しを行い、タスクが完了するまで処理を継続します。
+
+```typescript
+async recursivelyMakeClineRequests(
+  userMessage: string,
+  options: RecursiveRequestOptions = {}
+): Promise<void> {
+  // 初期状態の設定
+  this.isProcessing = true;
+  this.currentConversationId = generateUniqueId();
+  
+  try {
+    // システムプロンプトの生成
+    const systemPrompt = SYSTEM_PROMPT(this.config);
+    
+    // ユーザーカスタム指示の追加
+    const enhancedSystemPrompt = addUserInstructions(
+      systemPrompt,
+      this.config.userInstructions
+    );
+    
+    // 環境情報の収集
+    const environmentDetails = await this.getEnvironmentDetails();
+    
+    // 会話履歴の取得
+    const conversationHistory = this.apiConversationHistory.getHistory();
+    
+    // 初期APIリクエストの構築
+    let apiRequest = this.buildInitialApiRequest(
+      enhancedSystemPrompt,
+      userMessage,
+      environmentDetails,
+      conversationHistory,
+      options
+    );
+    
+    // 再帰的なAPIリクエスト処理
+    await this.executeRecursiveApiRequests(apiRequest);
+  } catch (error) {
+    // エラー処理
+    this.handleApiError(error);
+  } finally {
+    // 処理完了状態の設定
+    this.isProcessing = false;
+  }
+}
+```
+
+#### 2. `SYSTEM_PROMPT`関数によるシステムプロンプト生成
+
+`SYSTEM_PROMPT`関数は`cline/src/core/prompts/system.ts`で定義されており、CoolClineの基本的な動作を定義するシステムプロンプトを生成します。この関数は設定オブジェクトを引数に取り、それに基づいてカスタマイズされたシステムプロンプトを返します。
+
+```typescript
+export const SYSTEM_PROMPT = (config: ClineConfig): string => {
+  // 基本的な自己紹介部分
+  const introduction = `You are CoolCline, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices.`;
+  
+  // ツール使用セクション
+  const toolUseSection = generateToolUseSection(config.availableTools);
+  
+  // 能力セクション
+  const capabilitiesSection = generateCapabilitiesSection(config);
+  
+  // ルールセクション
+  const rulesSection = generateRulesSection(config);
+  
+  // システム情報セクション
+  const systemInfoSection = generateSystemInfoSection();
+  
+  // 目標セクション
+  const objectiveSection = generateObjectiveSection();
+  
+  // 各セクションを結合
+  return [
+    introduction,
+    "====",
+    toolUseSection,
+    "====",
+    capabilitiesSection,
+    "====",
+    rulesSection,
+    "====",
+    systemInfoSection,
+    "====",
+    objectiveSection
+  ].join("\n\n");
+};
+```
+
+各セクション生成関数は、それぞれのセクションの内容を詳細に定義しています：
+
+- `generateToolUseSection`: 利用可能なツールの説明とその使用方法を生成
+- `generateCapabilitiesSection`: CoolClineの能力と機能を説明
+- `generateRulesSection`: CoolClineの動作ルールを定義
+- `generateSystemInfoSection`: OS、シェル、ディレクトリなどのシステム情報を提供
+- `generateObjectiveSection`: CoolClineの目標と作業方法を説明
+
+これらのセクションは、CoolClineの動作を包括的に定義し、AIモデルに適切な指示を与えます。
+
+#### 3. `addUserInstructions`関数によるカスタム指示の追加
+
+`addUserInstructions`関数は、ユーザーが設定したカスタム指示をシステムプロンプトに追加する役割を担っています。この関数は以下のような処理を行います：
+
+```typescript
+export function addUserInstructions(
+  systemPrompt: string,
+  userInstructions?: string
+): string {
+  // ユーザー指示がない場合は元のシステムプロンプトをそのまま返す
+  if (!userInstructions || userInstructions.trim() === "") {
+    return systemPrompt;
+  }
+  
+  // ユーザー指示セクションを作成
+  const userInstructionsSection = `
+====
+
+USER'S CUSTOM INSTRUCTIONS
+
+The following additional instructions are provided by the user, and should be followed to the best of your ability without interfering with the TOOL USE guidelines.
+
+${userInstructions}
+`;
+  
+  // システムプロンプトにユーザー指示セクションを追加
+  return systemPrompt + userInstructionsSection;
+}
+```
+
+ユーザーのカスタム指示は、VSCode設定やCoolClineの設定UIから設定でき、言語の好み、コーディングスタイル、特定のフレームワークの使用など、ユーザー固有の要件を指定できます。これにより、CoolClineの応答をユーザーの好みに合わせてカスタマイズすることが可能になります。
+
+#### 4. `getEnvironmentDetails`メソッドによる環境情報の収集
+
+`getEnvironmentDetails`メソッドは、現在のVSCode環境に関する詳細情報を収集します。この情報は、CoolClineがコンテキストを理解し、適切な応答を生成するために重要です。
+
+```typescript
+async getEnvironmentDetails(): Promise<EnvironmentDetails> {
+  // 現在開いているファイルの情報を取得
+  const visibleFiles = await this.editorService.getVisibleFiles();
+  
+  // 現在開いているタブの情報を取得
+  const openTabs = await this.editorService.getOpenTabs();
+  
+  // 現在のワークスペースディレクトリの情報を取得
+  const workspaceFiles = await this.workspaceService.getWorkspaceFiles();
+  
+  // 現在実行中のターミナルの情報を取得
+  const activeTerminals = await this.terminalService.getActiveTerminals();
+  
+  // 現在の時刻情報を取得
+  const currentTime = this.timeService.getCurrentTimeFormatted();
+  
+  // 現在のモード情報を取得
+  const currentMode = this.modeService.getCurrentMode();
+  
+  // 現在のコンテキストサイズ情報を取得
+  const contextSize = this.contextService.getCurrentContextSize();
+  
+  // 収集した情報を構造化
+  return {
+    visibleFiles,
+    openTabs,
+    workspaceFiles,
+    activeTerminals,
+    currentTime,
+    currentMode,
+    contextSize,
+    // その他の環境情報
+    systemInfo: this.systemInfoService.getSystemInfo()
+  };
+}
+```
+
+収集された環境情報は、以下のような形式でAPIリクエストに含まれます：
+
+```
+# VSCode Visible Files
+index.html
+style.css
+script.js
+
+# VSCode Open Tabs
+index.html
+
+# Current Working Directory (/Users/username/projects) Files
+index.html
+style.css
+script.js
+README.md
+package.json
+...
+
+# Current Time
+2025/3/10 午後12:15:00 (Asia/Tokyo, UTC+9:00)
+
+# Current Mode
+code
+
+# Actively Running Terminals
+Terminal 1: npm run dev (Running for 5m 30s)
+```
+
+この環境情報は、CoolClineがユーザーの現在の作業コンテキストを理解し、適切なファイルやコードを参照するのに役立ちます。
+
+#### 5. `apiConversationHistory`からの会話履歴取得
+
+会話履歴は`apiConversationHistory`オブジェクトから取得され、これはCoolClineインスタンスの初期化時に作成されます。会話履歴の管理は以下のような実装になっています：
+
+```typescript
+class ApiConversationHistory {
+  private history: ApiMessage[] = [];
+  private maxHistoryLength: number;
+  
+  constructor(maxHistoryLength: number = 10) {
+    this.maxHistoryLength = maxHistoryLength;
+  }
+  
+  // 会話履歴を取得
+  getHistory(): ApiMessage[] {
+    return [...this.history];
+  }
+  
+  // 会話履歴に新しいメッセージを追加
+  addMessage(message: ApiMessage): void {
+    this.history.push(message);
+    
+    // 最大履歴長を超えた場合、古いメッセージを削除
+    if (this.history.length > this.maxHistoryLength) {
+      this.history = this.history.slice(this.history.length - this.maxHistoryLength);
+    }
+  }
+  
+  // 会話履歴をクリア
+  clearHistory(): void {
+    this.history = [];
+  }
+}
+```
+
+会話履歴は以下のような構造を持つ`ApiMessage`オブジェクトの配列として管理されます：
+
+```typescript
+interface ApiMessage {
+  role: "user" | "assistant";
+  content: ApiContent[];
+}
+
+type ApiContent = 
+  | { type: "text"; text: string }
+  | { type: "tool_use"; name: string; params: Record<string, any> };
+```
+
+会話履歴には、ユーザーの入力、CoolClineの応答、ツール使用の結果などが含まれ、これらは時系列順に保存されます。この履歴は、CoolClineが会話の文脈を理解し、一貫した応答を生成するために使用されます。
+
+#### 6. 最終的なプロンプトのAPIへの送信
+
+上記のステップで生成されたシステムプロンプト、ユーザーのカスタム指示、環境情報、会話履歴は、最終的に以下のような構造のAPIリクエストに組み込まれます：
+
+```typescript
+interface ApiRequest {
+  model: string;           // 使用するAIモデル（例: "claude-3-7-sonnet-20250219"）
+  system: string;          // システムプロンプト（カスタム指示を含む）
+  messages: ApiMessage[];  // 会話履歴
+  max_tokens: number;      // 最大トークン数
+  temperature: number;     // 温度（創造性の度合い）
+  // その他のオプションパラメータ
+}
+```
+
+このAPIリクエストは、`ApiService`を通じて適切なAIプロバイダー（Anthropic、OpenAI、Mistralなど）に送信されます：
+
+```typescript
+async sendApiRequest(request: ApiRequest): Promise<ApiResponse> {
+  // リクエスト前の前処理
+  this.preProcessRequest(request);
+  
+  // プロバイダーの選択
+  const provider = this.selectProvider(request.model);
+  
+  // リクエストの送信
+  const response = await provider.sendRequest({
+    ...request,
+    stream: true,  // ストリーミングレスポンスを有効化
+  });
+  
+  // レスポンスの後処理
+  return this.postProcessResponse(response);
+}
+```
+
+APIリクエストは通常ストリーミングモードで送信され、これによりCoolClineはレスポンスを受信しながらリアルタイムでユーザーに表示することができます。
+
+#### 7. 変換フローの全体像
+
+システムプロンプトからAPIリクエストへの変換フローを図式化すると、以下のようになります：
+
+```
+┌─────────────────────┐
+│ ユーザーの入力受信  │
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│ システムプロンプト  │  ←── SYSTEM_PROMPT関数
+│ の生成             │
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│ ユーザーカスタム    │  ←── addUserInstructions関数
+│ 指示の追加         │
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│ 環境情報の収集      │  ←── getEnvironmentDetails関数
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│ 会話履歴の取得      │  ←── apiConversationHistory
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│ APIリクエストの     │
+│ 構築               │
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│ APIリクエストの     │
+│ 送信               │
+└─────────────────────┘
+```
+
+このフローは、ユーザーの入力を受け取ってから、適切なAPIリクエストを構築し、送信するまでの一連のプロセスを表しています。各ステップは、CoolClineの内部実装によって詳細に定義されており、ユーザーの入力に対して最適な応答を生成するために重要な役割を果たしています。
+
+#### 8. 変換フローの特徴と利点
+
+このような変換フローには、以下のような特徴と利点があります：
+
+1. **モジュール性**: 各ステップが明確に分離されており、機能ごとに独立したモジュールとして実装されています。これにより、コードの保守性と拡張性が向上します。
+
+2. **柔軟性**: システムプロンプト、ユーザーカスタム指示、環境情報などの各要素を独立して変更できるため、CoolClineの動作を柔軟にカスタマイズできます。
+
+3. **コンテキスト認識**: 環境情報と会話履歴を含めることで、CoolClineはユーザーの現在の作業コンテキストを理解し、より適切な応答を生成できます。
+
+4. **再利用性**: 一度生成されたシステムプロンプトは、会話の各ターンで再利用され、一貫した動作を保証します。
+
+5. **効率性**: 必要な情報のみを収集し、APIリクエストに含めることで、トークン使用量を最適化し、応答速度を向上させます。
+
+このように、CoolClineのシステムプロンプトからAPIリクエストへの変換フローは、効率的で柔軟性の高い設計になっており、ユーザーの要求に対して最適な応答を生成するための基盤となっています。
 
 ### 2.2 具体的な変換例
 
