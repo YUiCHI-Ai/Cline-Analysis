@@ -188,38 +188,290 @@ APIリクエストは以下の構造になります：
 
 APIからのレスポンスは、`parseAssistantMessage`関数によって詳細に解析されます。この処理は以下のステップで行われます：
 
-1. **レスポンスの構造解析**：
-   - APIレスポンスは`content`配列を含み、各要素は`type`と内容を持ちます
-   - `type: "text"`はテキストメッセージ、`type: "tool_use"`はツール使用を表します
-   - `cline/src/core/assistant-message/parse.ts`で実装されています
+#### 3.2.1 レスポンスの構造解析
 
-2. **テキストとツール使用の分離**：
-   - レスポンスから`<thinking>...</thinking>`タグで囲まれた思考プロセスを抽出
-   - テキストコンテンツとツール使用部分を分離して処理
-   - テキストは表示用にマークダウンとして解析され、ツール使用は実行用に構造化されます
+APIレスポンスは以下のような構造を持っています：
 
-3. **ツール使用の構造化**：
-   - ツール使用（例：`read_file`）が検出されると、XMLパーサーによって解析
-   - ツール名とパラメータ（例：`path: "index.html"`）が抽出され、構造化データに変換
-   - 以下のような構造に変換されます：
-   ```typescript
-   {
-     toolName: "read_file",
-     parameters: {
-       path: "index.html"
-     }
-   }
-   ```
+```typescript
+interface AssistantResponse {
+  role: "assistant";
+  content: ContentItem[];
+}
 
-4. **バリデーション処理**：
-   - 抽出されたツール名が有効なツールかどうかを確認
-   - 必須パラメータが存在するかチェック
-   - パラメータの型や値が適切かどうかを検証
-   - 無効なツール使用の場合はエラーメッセージを生成
+type ContentItem =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; name: string; params: Record<string, any> };
+```
 
-5. **メッセージの構造化**：
-   - テキスト部分とツール使用部分を含む構造化されたメッセージオブジェクトを生成
-   - このオブジェクトは後続の処理（表示やツール実行）で使用されます
+解析処理は`cline/src/core/assistant-message/parse.ts`で実装されており、以下のような流れで行われます：
+
+1. **初期検証**：
+   - レスポンスが`role: "assistant"`を持つことを確認
+   - `content`配列が存在し、少なくとも1つの要素を含むことを確認
+   - 無効な構造の場合は早期にエラーを返す
+
+2. **コンテンツタイプの識別**：
+   - 各コンテンツアイテムの`type`フィールドを検査
+   - サポートされているタイプ（"text"または"tool_use"）かどうかを確認
+   - 未知のタイプの場合は警告をログに記録し、可能な限り処理を継続
+
+3. **コンテンツの正規化**：
+   - テキストコンテンツの場合、空白の正規化や特殊文字のエスケープ処理を実施
+   - ツール使用コンテンツの場合、パラメータの型変換や正規化を実施
+   - 実際のコードでは以下のような処理が行われます：
+
+```typescript
+function normalizeContent(content: ContentItem[]): NormalizedContent[] {
+  return content.map(item => {
+    if (item.type === "text") {
+      return {
+        type: "text",
+        text: normalizeText(item.text)
+      };
+    } else if (item.type === "tool_use") {
+      return {
+        type: "tool_use",
+        name: item.name.trim(),
+        params: normalizeParams(item.params)
+      };
+    }
+    // 未知のタイプの場合
+    logger.warn(`Unknown content type: ${(item as any).type}`);
+    return null;
+  }).filter(Boolean) as NormalizedContent[];
+}
+```
+
+#### 3.2.2 テキストとツール使用の分離
+
+テキストコンテンツとツール使用コンテンツは異なる処理が必要なため、分離して処理されます：
+
+1. **思考プロセスの抽出**：
+   - テキストコンテンツから`<thinking>...</thinking>`タグで囲まれた部分を正規表現で抽出
+   - 抽出された思考プロセスは内部分析用に保存され、ユーザーには表示されない
+   - 実装例：
+
+```typescript
+function extractThinking(text: string): { thinking: string | null; visibleText: string } {
+  const thinkingRegex = /<thinking>([\s\S]*?)<\/thinking>/g;
+  const matches = [...text.matchAll(thinkingRegex)];
+  
+  if (matches.length === 0) {
+    return { thinking: null, visibleText: text };
+  }
+  
+  const thinking = matches.map(match => match[1].trim()).join('\n\n');
+  const visibleText = text.replace(thinkingRegex, '').trim();
+  
+  return { thinking, visibleText };
+}
+```
+
+2. **マークダウン処理**：
+   - 表示用テキストはマークダウンとして解析され、HTML要素に変換
+   - コードブロックは構文ハイライト処理が適用される
+   - 数式やダイアグラムなどの特殊なマークダウン拡張もサポート
+
+3. **テキストセグメント化**：
+   - 長いテキストは適切なセグメントに分割され、段階的に表示
+   - セグメント化はセンテンス境界や段落境界を考慮して行われる
+   - 実装例：
+
+```typescript
+function segmentText(text: string): string[] {
+  // 段落で分割
+  const paragraphs = text.split(/\n\s*\n/);
+  
+  // 長い段落をさらに分割
+  return paragraphs.flatMap(paragraph => {
+    if (paragraph.length < MAX_SEGMENT_LENGTH) {
+      return [paragraph];
+    }
+    
+    // 長い段落はセンテンス境界で分割
+    return segmentLongParagraph(paragraph);
+  });
+}
+```
+
+#### 3.2.3 ツール使用の構造化
+
+ツール使用コンテンツは、XMLパーサーを使用して詳細に解析されます：
+
+1. **XMLパース処理**：
+   - ツール使用は`<tool_name>...</tool_name>`形式のXMLとして表現
+   - パラメータも`<param_name>...</param_name>`形式で表現
+   - 実際のパース処理は以下のようなステップで行われます：
+     1. XMLノードの抽出
+     2. ルートノード（ツール名）の識別
+     3. 子ノード（パラメータ）の抽出
+     4. ネストされたパラメータの再帰的解析
+
+2. **パラメータの型変換**：
+   - 文字列として受け取ったパラメータ値を適切な型に変換
+   - 数値、真偽値、配列、オブジェクトなどの型をサポート
+   - JSON文字列の自動パースも実施
+   - 実装例：
+
+```typescript
+function convertParameterType(value: string, expectedType: string): any {
+  if (expectedType === 'number') {
+    const num = Number(value);
+    if (isNaN(num)) {
+      throw new Error(`Expected number, got: ${value}`);
+    }
+    return num;
+  } else if (expectedType === 'boolean') {
+    if (value.toLowerCase() === 'true') return true;
+    if (value.toLowerCase() === 'false') return false;
+    throw new Error(`Expected boolean, got: ${value}`);
+  } else if (expectedType === 'object' || expectedType === 'array') {
+    try {
+      return JSON.parse(value);
+    } catch (e) {
+      throw new Error(`Expected JSON ${expectedType}, got invalid JSON: ${value}`);
+    }
+  }
+  // デフォルトは文字列
+  return value;
+}
+```
+
+3. **構造化データへの変換**：
+   - パース結果は以下のような構造化データに変換されます：
+
+```typescript
+interface ToolUse {
+  toolName: string;
+  parameters: Record<string, any>;
+  rawXml: string; // デバッグ用に元のXMLも保持
+}
+
+// 例：read_fileツールの場合
+const toolUseExample: ToolUse = {
+  toolName: "read_file",
+  parameters: {
+    path: "index.html"
+  },
+  rawXml: "<read_file>\n<path>index.html</path>\n</read_file>"
+};
+```
+
+4. **特殊パラメータの処理**：
+   - 複数行テキストやコードブロックなどの特殊なパラメータ形式を処理
+   - XMLエスケープ文字（`&lt;`, `&gt;`, `&amp;`など）の適切な変換
+   - CData セクションのサポート（`<![CDATA[...]]>`）
+
+#### 3.2.4 バリデーション処理
+
+抽出されたツール使用は、安全性と正確性を確保するために厳密にバリデーションされます：
+
+1. **ツール名の検証**：
+   - 抽出されたツール名が登録済みのツールリストに存在するか確認
+   - 大文字小文字の違いや類似名を考慮した曖昧さ解消も実施
+   - 実装例：
+
+```typescript
+function validateToolName(toolName: string): string {
+  const registeredTools = getRegisteredTools();
+  
+  // 完全一致
+  if (registeredTools.includes(toolName)) {
+    return toolName;
+  }
+  
+  // 大文字小文字を無視した一致
+  const lowerToolName = toolName.toLowerCase();
+  const match = registeredTools.find(t => t.toLowerCase() === lowerToolName);
+  if (match) {
+    logger.info(`Tool name case mismatch. Requested: ${toolName}, Using: ${match}`);
+    return match;
+  }
+  
+  // 類似ツールの提案
+  const suggestions = findSimilarTools(toolName);
+  throw new ToolValidationError(
+    `Unknown tool: ${toolName}`,
+    suggestions.length > 0 ? `Did you mean: ${suggestions.join(', ')}?` : undefined
+  );
+}
+```
+
+2. **必須パラメータの検証**：
+   - 各ツールの必須パラメータが存在するかチェック
+   - 不足しているパラメータがある場合はエラーを生成
+   - ツールのスキーマ定義と照合して検証
+
+3. **パラメータ型の検証**：
+   - パラメータ値が期待される型と一致するかチェック
+   - 型変換が可能な場合は自動変換を試みる
+   - 変換できない場合はエラーを生成
+
+4. **セキュリティ検証**：
+   - ファイルパスやコマンドなどの危険なパラメータに対する追加検証
+   - ディレクトリトラバーサル攻撃やコマンドインジェクションの防止
+   - 許可リストや禁止リストとの照合
+
+5. **エラーメッセージの生成**：
+   - バリデーション失敗時の詳細なエラーメッセージを生成
+   - ユーザーフレンドリーな修正提案を含める
+   - エラーの種類に応じた適切なエラーコードを設定
+
+#### 3.2.5 メッセージの構造化
+
+解析とバリデーションが完了すると、最終的な構造化メッセージが生成されます：
+
+1. **メッセージオブジェクトの構築**：
+   - テキスト部分とツール使用部分を含む統合されたメッセージオブジェクトを生成
+   - 思考プロセスは内部用プロパティとして保持
+   - 実装例：
+
+```typescript
+interface ParsedAssistantMessage {
+  text: string;
+  thinking?: string;
+  toolUse?: ToolUse;
+  segments: string[];
+  hasError: boolean;
+  errorMessage?: string;
+}
+
+function buildFinalMessage(
+  visibleText: string,
+  thinking: string | null,
+  toolUse: ToolUse | null,
+  hasError: boolean = false,
+  errorMessage?: string
+): ParsedAssistantMessage {
+  return {
+    text: visibleText,
+    ...(thinking ? { thinking } : {}),
+    ...(toolUse ? { toolUse } : {}),
+    segments: segmentText(visibleText),
+    hasError,
+    ...(errorMessage ? { errorMessage } : {})
+  };
+}
+```
+
+2. **メタデータの付加**：
+   - タイムスタンプ、メッセージID、処理時間などのメタデータを追加
+   - デバッグ情報や追跡情報も必要に応じて付加
+
+3. **キャッシュと最適化**：
+   - 頻繁に使用されるパース結果をキャッシュして処理を最適化
+   - 大きなメッセージの場合は遅延処理や段階的処理を適用
+
+4. **エラー回復メカニズム**：
+   - 部分的なパースエラーが発生した場合の回復メカニズム
+   - 可能な限り有効な情報を抽出し、エラー部分をスキップ
+
+5. **最終検証**：
+   - 構造化されたメッセージの整合性を最終確認
+   - 必要なフィールドがすべて存在するか確認
+   - 循環参照などの問題がないか確認
+
+このように、APIレスポンスの解析は複数の詳細なステップを経て行われ、テキストとツール使用を適切に構造化し、後続の処理で使用できる形式に変換します。この処理により、CoolClineはAIの応答から正確にツール使用を抽出し、安全に実行することができます。
 
 ### 3.3 ツールの実行
 
